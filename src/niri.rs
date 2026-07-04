@@ -23,7 +23,6 @@ use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::Keycode;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
-use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::{
     select_dmabuf_feedback, CropRenderElement, Relocate, RelocateRenderElement,
     RescaleRenderElement,
@@ -148,9 +147,8 @@ use crate::niri_render_elements;
 use crate::protocols::ext_workspace::{self, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
 use smithay::wayland::color::management::{
-    get_surface_description, ColorManagementState, ColorManagementSurfaceCachedState, Feature,
-    ImageDescription, Primaries as CmPrimaries, RenderIntent,
-    TransferFunction as CmTransferFunction,
+    ColorManagementState, ColorManagementSurfaceCachedState, Feature, ImageDescription,
+    Primaries as CmPrimaries, RenderIntent, TransferFunction as CmTransferFunction,
 };
 
 use crate::protocols::gamma_control::GammaControlManagerState;
@@ -158,6 +156,7 @@ use crate::protocols::mutter_x11_interop::MutterX11InteropManagerState;
 use crate::protocols::output_management::OutputManagementManagerState;
 use crate::protocols::screencopy::{Screencopy, ScreencopyBuffer, ScreencopyManagerState};
 use crate::protocols::virtual_pointer::VirtualPointerManagerState;
+use crate::render_helpers::blend::BlendSurfaceRenderElement;
 use crate::render_helpers::blur::BlurOptions;
 use crate::render_helpers::debug::push_opaque_regions;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
@@ -2245,10 +2244,10 @@ impl State {
 }
 
 impl Niri {
-    /// For Phase 1 HDR passthrough: if `output` is showing a fullscreen window whose surface carries
-    /// an HDR (PQ / BT.2020) image description, returns that description. The TTY backend uses this
-    /// to decide whether to signal HDR on the connector. Requires the window to be fullscreen so the
-    /// HDR signal covers the whole output and doesn't wash out surrounding SDR content.
+    /// For fullscreen HDR passthrough: if `output` is showing a fullscreen window whose surface
+    /// carries an HDR (PQ / BT.2020) image description, returns that description. The TTY backend
+    /// uses this to decide whether to signal HDR on the connector in auto mode, and which metadata
+    /// to attach.
     ///
     /// The whole surface tree is searched, not just the toplevel surface: winewayland (Proton)
     /// presents Vulkan content on a subsurface of the toplevel and attaches the HDR image
@@ -6743,7 +6742,7 @@ fn scale_relocate_crop<E: Element>(
 
 niri_render_elements! {
     PointerRenderElements<R> => {
-        Wayland = WaylandSurfaceRenderElement<R>,
+        Wayland = BlendSurfaceRenderElement<R>,
         NamedPointer = MemoryRenderBufferRenderElement<R>,
     }
 }
@@ -6767,7 +6766,7 @@ niri_render_elements! {
             SolidColorRenderElement
         >>>,
         Pointer = PointerRenderElements<R>,
-        Wayland = WaylandSurfaceRenderElement<R>,
+        Wayland = BlendSurfaceRenderElement<R>,
         SolidColor = SolidColorRenderElement,
         ScreenshotUi = ScreenshotUiRenderElement,
         WindowMruUi = WindowMruUiRenderElement<R>,
