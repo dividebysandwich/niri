@@ -22,6 +22,7 @@ use smithay::reexports::wayland_server::{
 use smithay::wayland::shell::xdg::{
     ToplevelState, ToplevelStateSet, XdgToplevelSurfaceRoleAttributes,
 };
+use smithay::wayland::{Dispatch2, GlobalDispatch2};
 
 use crate::niri::State;
 use crate::utils::with_toplevel_role_and_current;
@@ -64,13 +65,16 @@ pub struct ForeignToplevelGlobalData {
     filter: Arc<dyn for<'c> Fn(&'c Client) -> bool + Send + Sync>,
 }
 
+/// User data shared by the ext/wlr foreign-toplevel manager, list, and handle resources.
+pub struct ForeignToplevelManagerData;
+
 impl ForeignToplevelManagerState {
     pub fn new<D, F>(display: &DisplayHandle, filter: F) -> Self
     where
         D: GlobalDispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelGlobalData>,
         D: GlobalDispatch<ExtForeignToplevelListV1, ForeignToplevelGlobalData>,
-        D: Dispatch<ZwlrForeignToplevelManagerV1, ()>,
-        D: Dispatch<ExtForeignToplevelListV1, ()>,
+        D: Dispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelManagerData>,
+        D: Dispatch<ExtForeignToplevelListV1, ForeignToplevelManagerData>,
         D: 'static,
         F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
     {
@@ -325,11 +329,15 @@ impl ToplevelData {
         client: &Client,
         manager: &ExtForeignToplevelListV1,
     ) where
-        D: Dispatch<ExtForeignToplevelHandleV1, ()>,
+        D: Dispatch<ExtForeignToplevelHandleV1, ForeignToplevelManagerData>,
         D: 'static,
     {
         let toplevel = client
-            .create_resource::<ExtForeignToplevelHandleV1, _, D>(handle, manager.version(), ())
+            .create_resource::<ExtForeignToplevelHandleV1, _, D>(
+                handle,
+                manager.version(),
+                ForeignToplevelManagerData,
+            )
             .unwrap();
         manager.toplevel(&toplevel);
 
@@ -353,11 +361,15 @@ impl ToplevelData {
         client: &Client,
         manager: &ZwlrForeignToplevelManagerV1,
     ) where
-        D: Dispatch<ZwlrForeignToplevelHandleV1, ()>,
+        D: Dispatch<ZwlrForeignToplevelHandleV1, ForeignToplevelManagerData>,
         D: 'static,
     {
         let toplevel = client
-            .create_resource::<ZwlrForeignToplevelHandleV1, _, D>(handle, manager.version(), ())
+            .create_resource::<ZwlrForeignToplevelHandleV1, _, D>(
+                handle,
+                manager.version(),
+                ForeignToplevelManagerData,
+            )
             .unwrap();
         manager.toplevel(&toplevel);
 
@@ -384,23 +396,21 @@ impl ToplevelData {
     }
 }
 
-impl<D> GlobalDispatch<ExtForeignToplevelListV1, ForeignToplevelGlobalData, D>
-    for ForeignToplevelManagerState
+impl<D> GlobalDispatch2<ExtForeignToplevelListV1, D> for ForeignToplevelGlobalData
 where
-    D: GlobalDispatch<ExtForeignToplevelListV1, ForeignToplevelGlobalData>,
-    D: Dispatch<ExtForeignToplevelListV1, ()>,
-    D: Dispatch<ExtForeignToplevelHandleV1, ()>,
+    D: Dispatch<ExtForeignToplevelListV1, ForeignToplevelManagerData>,
+    D: Dispatch<ExtForeignToplevelHandleV1, ForeignToplevelManagerData>,
     D: ForeignToplevelHandler,
 {
     fn bind(
+        &self,
         state: &mut D,
         handle: &DisplayHandle,
         client: &Client,
         resource: New<ExtForeignToplevelListV1>,
-        _global_data: &ForeignToplevelGlobalData,
         data_init: &mut DataInit<'_, D>,
     ) {
-        let manager = data_init.init(resource, ());
+        let manager = data_init.init(resource, ForeignToplevelManagerData);
 
         let state = state.foreign_toplevel_manager_state();
 
@@ -411,22 +421,21 @@ where
         state.ext_list_instances.insert(manager);
     }
 
-    fn can_view(client: Client, global_data: &ForeignToplevelGlobalData) -> bool {
-        (global_data.filter)(&client)
+    fn can_view(&self, client: &Client) -> bool {
+        (self.filter)(client)
     }
 }
 
-impl<D> Dispatch<ExtForeignToplevelListV1, (), D> for ForeignToplevelManagerState
+impl<D> Dispatch2<ExtForeignToplevelListV1, D> for ForeignToplevelManagerData
 where
-    D: Dispatch<ExtForeignToplevelListV1, ()>,
     D: ForeignToplevelHandler,
 {
     fn request(
+        &self,
         state: &mut D,
         _client: &Client,
         resource: &ExtForeignToplevelListV1,
         request: <ExtForeignToplevelListV1 as Resource>::Request,
-        _data: &(),
         _dhandle: &DisplayHandle,
         _data_init: &mut DataInit<'_, D>,
     ) {
@@ -443,29 +452,23 @@ where
         }
     }
 
-    fn destroyed(
-        state: &mut D,
-        _client: ClientId,
-        resource: &ExtForeignToplevelListV1,
-        _data: &(),
-    ) {
+    fn destroyed(&self, state: &mut D, _client: ClientId, resource: &ExtForeignToplevelListV1) {
         // also remove the instance here, in case `stop` was never sent, e.g. sudden disconnect.
         let state = state.foreign_toplevel_manager_state();
         state.ext_list_instances.remove(resource);
     }
 }
 
-impl<D> Dispatch<ExtForeignToplevelHandleV1, (), D> for ForeignToplevelManagerState
+impl<D> Dispatch2<ExtForeignToplevelHandleV1, D> for ForeignToplevelManagerData
 where
-    D: Dispatch<ExtForeignToplevelHandleV1, ()>,
     D: ForeignToplevelHandler,
 {
     fn request(
+        &self,
         _state: &mut D,
         _client: &Client,
         _resource: &ExtForeignToplevelHandleV1,
         request: <ExtForeignToplevelHandleV1 as Resource>::Request,
-        _data: &(),
         _dhandle: &DisplayHandle,
         _data_init: &mut DataInit<'_, D>,
     ) {
@@ -475,12 +478,7 @@ where
         }
     }
 
-    fn destroyed(
-        state: &mut D,
-        _client: ClientId,
-        resource: &ExtForeignToplevelHandleV1,
-        _data: &(),
-    ) {
+    fn destroyed(&self, state: &mut D, _client: ClientId, resource: &ExtForeignToplevelHandleV1) {
         let state = state.foreign_toplevel_manager_state();
         for data in state.toplevels.values_mut() {
             data.ext_list_instances.remove(resource);
@@ -488,23 +486,21 @@ where
     }
 }
 
-impl<D> GlobalDispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelGlobalData, D>
-    for ForeignToplevelManagerState
+impl<D> GlobalDispatch2<ZwlrForeignToplevelManagerV1, D> for ForeignToplevelGlobalData
 where
-    D: GlobalDispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelGlobalData>,
-    D: Dispatch<ZwlrForeignToplevelManagerV1, ()>,
-    D: Dispatch<ZwlrForeignToplevelHandleV1, ()>,
+    D: Dispatch<ZwlrForeignToplevelManagerV1, ForeignToplevelManagerData>,
+    D: Dispatch<ZwlrForeignToplevelHandleV1, ForeignToplevelManagerData>,
     D: ForeignToplevelHandler,
 {
     fn bind(
+        &self,
         state: &mut D,
         handle: &DisplayHandle,
         client: &Client,
         resource: New<ZwlrForeignToplevelManagerV1>,
-        _global_data: &ForeignToplevelGlobalData,
         data_init: &mut DataInit<'_, D>,
     ) {
-        let manager = data_init.init(resource, ());
+        let manager = data_init.init(resource, ForeignToplevelManagerData);
 
         let state = state.foreign_toplevel_manager_state();
 
@@ -515,22 +511,21 @@ where
         state.wlr_management_instances.insert(manager);
     }
 
-    fn can_view(client: Client, global_data: &ForeignToplevelGlobalData) -> bool {
-        (global_data.filter)(&client)
+    fn can_view(&self, client: &Client) -> bool {
+        (self.filter)(client)
     }
 }
 
-impl<D> Dispatch<ZwlrForeignToplevelManagerV1, (), D> for ForeignToplevelManagerState
+impl<D> Dispatch2<ZwlrForeignToplevelManagerV1, D> for ForeignToplevelManagerData
 where
-    D: Dispatch<ZwlrForeignToplevelManagerV1, ()>,
     D: ForeignToplevelHandler,
 {
     fn request(
+        &self,
         state: &mut D,
         _client: &Client,
         resource: &ZwlrForeignToplevelManagerV1,
         request: <ZwlrForeignToplevelManagerV1 as Resource>::Request,
-        _data: &(),
         _dhandle: &DisplayHandle,
         _data_init: &mut DataInit<'_, D>,
     ) {
@@ -546,29 +541,23 @@ where
         }
     }
 
-    fn destroyed(
-        state: &mut D,
-        _client: ClientId,
-        resource: &ZwlrForeignToplevelManagerV1,
-        _data: &(),
-    ) {
+    fn destroyed(&self, state: &mut D, _client: ClientId, resource: &ZwlrForeignToplevelManagerV1) {
         // also remove the instance here, in case `stop` was never sent, e.g. sudden disconnect.
         let state = state.foreign_toplevel_manager_state();
         state.wlr_management_instances.remove(resource);
     }
 }
 
-impl<D> Dispatch<ZwlrForeignToplevelHandleV1, (), D> for ForeignToplevelManagerState
+impl<D> Dispatch2<ZwlrForeignToplevelHandleV1, D> for ForeignToplevelManagerData
 where
-    D: Dispatch<ZwlrForeignToplevelHandleV1, ()>,
     D: ForeignToplevelHandler,
 {
     fn request(
+        &self,
         state: &mut D,
         _client: &Client,
         resource: &ZwlrForeignToplevelHandleV1,
         request: <ZwlrForeignToplevelHandleV1 as Resource>::Request,
-        _data: &(),
         _dhandle: &DisplayHandle,
         _data_init: &mut DataInit<'_, D>,
     ) {
@@ -608,12 +597,7 @@ where
         }
     }
 
-    fn destroyed(
-        state: &mut D,
-        _client: ClientId,
-        resource: &ZwlrForeignToplevelHandleV1,
-        _data: &(),
-    ) {
+    fn destroyed(&self, state: &mut D, _client: ClientId, resource: &ZwlrForeignToplevelHandleV1) {
         let state = state.foreign_toplevel_manager_state();
         for data in state.toplevels.values_mut() {
             data.wlr_management_instances.remove(resource);
@@ -645,27 +629,4 @@ fn to_state_vec(states: &ToplevelStateSet, has_focus: bool) -> ArrayVec<u32, 3> 
     rv
 }
 
-#[macro_export]
-macro_rules! delegate_foreign_toplevel {
-    ($(@<$( $lt:tt $( : $clt:tt $(+ $dlt:tt )* )? ),+>)? $ty: ty) => {
-        smithay::reexports::wayland_server::delegate_global_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
-            smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::server::ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1: $crate::protocols::foreign_toplevel::ForeignToplevelGlobalData
-        ] => $crate::protocols::foreign_toplevel::ForeignToplevelManagerState);
-        smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
-            smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::server::ext_foreign_toplevel_list_v1::ExtForeignToplevelListV1: ()
-        ] => $crate::protocols::foreign_toplevel::ForeignToplevelManagerState);
-        smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
-            smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::server::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1: ()
-        ] => $crate::protocols::foreign_toplevel::ForeignToplevelManagerState);
-
-        smithay::reexports::wayland_server::delegate_global_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
-            smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1: $crate::protocols::foreign_toplevel::ForeignToplevelGlobalData
-        ] => $crate::protocols::foreign_toplevel::ForeignToplevelManagerState);
-        smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
-            smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_manager_v1::ZwlrForeignToplevelManagerV1: ()
-        ] => $crate::protocols::foreign_toplevel::ForeignToplevelManagerState);
-        smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
-            smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_handle_v1::ZwlrForeignToplevelHandleV1: ()
-        ] => $crate::protocols::foreign_toplevel::ForeignToplevelManagerState);
-    };
-}
+// Delegated via the crate-wide delegate_dispatch2!(State); per-protocol macro no longer needed.
