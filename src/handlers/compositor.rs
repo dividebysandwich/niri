@@ -522,7 +522,6 @@ impl ShmHandler for State {
     }
 }
 
-
 impl State {
     pub fn add_default_dmabuf_pre_commit_hook(&mut self, surface: &WlSurface) {
         if !surface.is_alive() {

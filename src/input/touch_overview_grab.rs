@@ -135,12 +135,7 @@ impl TouchGrab<State> for TouchOverviewGrab {
         }
     }
 
-    fn up(
-        &mut self,
-        data: &mut State,
-        handle: &mut TouchInnerHandle<'_, State>,
-        event: &UpEvent,
-    ) {
+    fn up(&mut self, data: &mut State, handle: &mut TouchInnerHandle<'_, State>, event: &UpEvent) {
         handle.up(data, event);
 
         if event.slot != self.start_data.slot {

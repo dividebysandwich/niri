@@ -13,6 +13,7 @@ use std::time::Duration;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::drm::DrmNode;
 use smithay::backend::input::{InputEvent, TabletToolDescriptor};
+use smithay::delegate_dispatch2;
 use smithay::desktop::{PopupKind, PopupManager};
 use smithay::input::dnd::{self, DnDGrab, DndGrabHandler, DndTarget};
 use smithay::input::pointer::{CursorIcon, CursorImageStatus, Focus, PointerHandle};
@@ -61,7 +62,6 @@ use smithay::wayland::tablet_manager::TabletSeatHandler;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
-use smithay::delegate_dispatch2;
 
 pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
 use crate::layout::workspace::WorkspaceId;
@@ -272,7 +272,6 @@ impl KeyboardShortcutsInhibitHandler for State {
     }
 }
 
-
 impl SelectionHandler for State {
     type SelectionUserData = Arc<[u8]>;
 
@@ -392,7 +391,6 @@ impl crate::niri::Niri {
     }
 }
 
-
 impl PrimarySelectionHandler for State {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
         &mut self.niri.primary_selection_state
@@ -405,13 +403,11 @@ impl WlrDataControlHandler for State {
     }
 }
 
-
 impl ExtDataControlHandler for State {
     fn data_control_state(&mut self) -> &mut ExtDataControlState {
         &mut self.niri.ext_data_control_state
     }
 }
-
 
 impl OutputHandler for State {
     fn output_bound(&mut self, output: Output, wl_output: WlOutput) {
@@ -419,7 +415,6 @@ impl OutputHandler for State {
         ext_workspace::on_output_bound(self, &output, &wl_output);
     }
 }
-
 
 impl DmabufHandler for State {
     fn dmabuf_state(&mut self) -> &mut DmabufState {
@@ -710,7 +705,6 @@ impl DrmLeaseHandler for State {
     }
 }
 
-
 impl GammaControlHandler for State {
     fn gamma_control_manager_state(&mut self) -> &mut GammaControlManagerState {
         &mut self.niri.gamma_control_manager_state
@@ -859,4 +853,3 @@ impl OutputManagementHandler for State {
 }
 
 impl MutterX11InteropHandler for State {}
-
