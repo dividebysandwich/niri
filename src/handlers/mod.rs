@@ -13,6 +13,7 @@ use std::time::Duration;
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::drm::DrmNode;
 use smithay::backend::input::{InputEvent, TabletToolDescriptor};
+use smithay::delegate_dispatch2;
 use smithay::desktop::{PopupKind, PopupManager};
 use smithay::input::dnd::{self, DnDGrab, DndGrabHandler, DndTarget};
 use smithay::input::pointer::{CursorIcon, CursorImageStatus, Focus, PointerHandle};
@@ -61,16 +62,6 @@ use smithay::wayland::tablet_manager::TabletSeatHandler;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
-use smithay::{
-    delegate_cursor_shape, delegate_data_control, delegate_data_device, delegate_dmabuf,
-    delegate_drm_lease, delegate_ext_data_control, delegate_fractional_scale,
-    delegate_idle_inhibit, delegate_idle_notify, delegate_input_method_manager,
-    delegate_keyboard_shortcuts_inhibit, delegate_output, delegate_pointer_constraints,
-    delegate_pointer_gestures, delegate_presentation, delegate_primary_selection,
-    delegate_relative_pointer, delegate_seat, delegate_security_context, delegate_session_lock,
-    delegate_single_pixel_buffer, delegate_tablet_manager, delegate_text_input_manager,
-    delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation,
-};
 
 pub use crate::handlers::xdg_shell::KdeDecorationsModeState;
 use crate::layout::workspace::WorkspaceId;
@@ -81,10 +72,10 @@ use crate::protocols::foreign_toplevel::{
     self, ForeignToplevelHandler, ForeignToplevelManagerState,
 };
 use smithay::reexports::wayland_protocols::wp::color_management::v1::server::wp_image_description_info_v1::WpImageDescriptionInfoV1;
-
-use crate::protocols::color_management::{
+use smithay::wayland::color::management::{
     send_image_description_info, ColorManagementHandler, ColorManagementState, ImageDescription,
 };
+
 use crate::protocols::gamma_control::{GammaControlHandler, GammaControlManagerState};
 use crate::protocols::mutter_x11_interop::MutterX11InteropHandler;
 use crate::protocols::output_management::{OutputManagementHandler, OutputManagementManagerState};
@@ -95,12 +86,11 @@ use crate::protocols::virtual_pointer::{
     VirtualPointerMotionEvent,
 };
 use crate::utils::{output_size, send_scale_transform};
-use crate::{
-    delegate_color_management, delegate_ext_workspace, delegate_foreign_toplevel,
-    delegate_gamma_control,
-    delegate_mutter_x11_interop, delegate_output_management, delegate_screencopy,
-    delegate_virtual_pointer,
-};
+
+// Smithay replaced the per-protocol `delegate_*!` macros with a single blanket-impl macro that
+// wires every `Dispatch2`/`GlobalDispatch2` user-data type (both smithay's and niri's custom
+// protocols) into `State`'s `Dispatch`/`GlobalDispatch`.
+delegate_dispatch2!(State);
 
 pub const XDG_ACTIVATION_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -144,11 +134,6 @@ impl SeatHandler for State {
         }
     }
 }
-delegate_seat!(State);
-delegate_cursor_shape!(State);
-delegate_pointer_gestures!(State);
-delegate_relative_pointer!(State);
-delegate_text_input_manager!(State);
 
 impl TabletSeatHandler for State {
     fn tablet_tool_image(&mut self, _tool: &TabletToolDescriptor, image: CursorImageStatus) {
@@ -158,9 +143,13 @@ impl TabletSeatHandler for State {
         self.niri.queue_redraw_all();
     }
 }
-delegate_tablet_manager!(State);
 
 impl PointerConstraintsHandler for State {
+    fn remove_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {
+        // Constraints are re-evaluated on the next pointer motion via `with_pointer_constraint`,
+        // so nothing extra is needed when one is removed.
+    }
+
     fn new_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {
         // Pointer constraints track pointer focus internally, so make sure it's up to date before
         // activating a new one.
@@ -223,7 +212,6 @@ impl PointerConstraintsHandler for State {
         }
     }
 }
-delegate_pointer_constraints!(State);
 
 impl InputMethodHandler for State {
     fn new_popup(&mut self, surface: PopupSurface) {
@@ -283,10 +271,6 @@ impl KeyboardShortcutsInhibitHandler for State {
             .remove(&inhibitor.wl_surface().clone());
     }
 }
-
-delegate_input_method_manager!(State);
-delegate_keyboard_shortcuts_inhibit!(State);
-delegate_virtual_keyboard_manager!(State);
 
 impl SelectionHandler for State {
     type SelectionUserData = Arc<[u8]>;
@@ -407,14 +391,11 @@ impl crate::niri::Niri {
     }
 }
 
-delegate_data_device!(State);
-
 impl PrimarySelectionHandler for State {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
         &mut self.niri.primary_selection_state
     }
 }
-delegate_primary_selection!(State);
 
 impl WlrDataControlHandler for State {
     fn data_control_state(&mut self) -> &mut WlrDataControlState {
@@ -422,15 +403,11 @@ impl WlrDataControlHandler for State {
     }
 }
 
-delegate_data_control!(State);
-
 impl ExtDataControlHandler for State {
     fn data_control_state(&mut self) -> &mut ExtDataControlState {
         &mut self.niri.ext_data_control_state
     }
 }
-
-delegate_ext_data_control!(State);
 
 impl OutputHandler for State {
     fn output_bound(&mut self, output: Output, wl_output: WlOutput) {
@@ -438,9 +415,6 @@ impl OutputHandler for State {
         ext_workspace::on_output_bound(self, &output, &wl_output);
     }
 }
-delegate_output!(State);
-
-delegate_presentation!(State);
 
 impl DmabufHandler for State {
     fn dmabuf_state(&mut self) -> &mut DmabufState {
@@ -460,7 +434,6 @@ impl DmabufHandler for State {
         }
     }
 }
-delegate_dmabuf!(State);
 
 impl SessionLockHandler for State {
     fn lock_state(&mut self) -> &mut SessionLockManagerState {
@@ -487,7 +460,6 @@ impl SessionLockHandler for State {
         self.niri.new_lock_surface(surface, &output);
     }
 }
-delegate_session_lock!(State);
 
 pub fn configure_lock_surface(surface: &LockSurface, output: &Output) {
     surface.with_pending_state(|states| {
@@ -518,14 +490,12 @@ impl SecurityContextHandler for State {
             .unwrap();
     }
 }
-delegate_security_context!(State);
 
 impl IdleNotifierHandler for State {
     fn idle_notifier_state(&mut self) -> &mut IdleNotifierState<Self> {
         &mut self.niri.idle_notifier_state
     }
 }
-delegate_idle_notify!(State);
 
 impl IdleInhibitHandler for State {
     fn inhibit(&mut self, surface: WlSurface) {
@@ -536,7 +506,6 @@ impl IdleInhibitHandler for State {
         self.niri.idle_inhibiting_surfaces.remove(&surface);
     }
 }
-delegate_idle_inhibit!(State);
 
 impl ForeignToplevelHandler for State {
     fn foreign_toplevel_manager_state(&mut self) -> &mut ForeignToplevelManagerState {
@@ -601,7 +570,6 @@ impl ForeignToplevelHandler for State {
         }
     }
 }
-delegate_foreign_toplevel!(State);
 
 impl ExtWorkspaceHandler for State {
     fn ext_workspace_manager_state(&mut self) -> &mut ExtWorkspaceManagerState {
@@ -637,7 +605,6 @@ impl ExtWorkspaceHandler for State {
         }
     }
 }
-delegate_ext_workspace!(State);
 
 impl ScreencopyHandler for State {
     fn frame(&mut self, manager: &ZwlrScreencopyManagerV1, screencopy: Screencopy) {
@@ -667,7 +634,6 @@ impl ScreencopyHandler for State {
         &mut self.niri.screencopy_state
     }
 }
-delegate_screencopy!(State);
 
 impl VirtualPointerHandler for State {
     fn virtual_pointer_manager_state(&mut self) -> &mut VirtualPointerManagerState {
@@ -692,7 +658,6 @@ impl VirtualPointerHandler for State {
         self.process_input_event(InputEvent::<VirtualPointerInputBackend>::PointerAxis { event });
     }
 }
-delegate_virtual_pointer!(State);
 
 impl DrmLeaseHandler for State {
     fn drm_lease_state(&mut self, node: DrmNode) -> &mut DrmLeaseState {
@@ -739,9 +704,6 @@ impl DrmLeaseHandler for State {
             .remove_lease(lease_id);
     }
 }
-delegate_drm_lease!(State);
-
-delegate_viewporter!(State);
 
 impl GammaControlHandler for State {
     fn gamma_control_manager_state(&mut self) -> &mut GammaControlManagerState {
@@ -772,7 +734,6 @@ impl GammaControlHandler for State {
         }
     }
 }
-delegate_gamma_control!(State);
 
 impl ColorManagementHandler for State {
     fn color_management_state(&mut self) -> &mut ColorManagementState {
@@ -782,6 +743,14 @@ impl ColorManagementHandler for State {
     fn image_description_changed(&mut self, _surface: &WlSurface) {
         // The stored description is picked up by the TTY render loop on the next frame, which
         // reconciles HDR signalling. A redraw is already scheduled by the surface commit.
+    }
+
+    fn description_for_output(&mut self, output: &Output) -> ImageDescription {
+        self.niri.output_blend_description(output)
+    }
+
+    fn preferred_description_for_surface(&mut self, surface: &WlSurface) -> ImageDescription {
+        self.niri.preferred_surface_description(surface)
     }
 
     fn schedule_image_description_info(
@@ -796,7 +765,6 @@ impl ColorManagementHandler for State {
         });
     }
 }
-delegate_color_management!(State);
 
 struct UrgentOnlyMarker;
 
@@ -870,10 +838,8 @@ impl XdgActivationHandler for State {
         self.niri.activation_state.remove_token(&token);
     }
 }
-delegate_xdg_activation!(State);
 
 impl FractionalScaleHandler for State {}
-delegate_fractional_scale!(State);
 
 impl OutputManagementHandler for State {
     fn output_management_state(&mut self) -> &mut OutputManagementManagerState {
@@ -885,9 +851,5 @@ impl OutputManagementHandler for State {
         self.reload_output_config();
     }
 }
-delegate_output_management!(State);
 
 impl MutterX11InteropHandler for State {}
-delegate_mutter_x11_interop!(State);
-
-delegate_single_pixel_buffer!(State);

@@ -19,7 +19,7 @@ use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 use smithay::utils::{Physical, Point, Rectangle, Size, Transform};
-use smithay::wayland::{dmabuf, shm};
+use smithay::wayland::{dmabuf, shm, Dispatch2, GlobalDispatch2};
 use wayland_backend::server::Credentials;
 use zwlr_screencopy_frame_v1::{Flags, ZwlrScreencopyFrameV1};
 use zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
@@ -207,11 +207,14 @@ pub struct ScreencopyManagerGlobalData {
     filter: Box<dyn for<'c> Fn(&'c Client) -> bool + Send + Sync>,
 }
 
+/// User data of the `zwlr_screencopy_manager_v1` resource.
+pub struct ScreencopyManagerData;
+
 impl ScreencopyManagerState {
     pub fn new<D, F>(display: &DisplayHandle, filter: F) -> Self
     where
         D: GlobalDispatch<ZwlrScreencopyManagerV1, ScreencopyManagerGlobalData>,
-        D: Dispatch<ZwlrScreencopyManagerV1, ()>,
+        D: Dispatch<ZwlrScreencopyManagerV1, ScreencopyManagerData>,
         D: Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
         D: ScreencopyHandler,
         D: 'static,
@@ -278,24 +281,22 @@ impl ScreencopyManagerState {
     }
 }
 
-impl<D> GlobalDispatch<ZwlrScreencopyManagerV1, ScreencopyManagerGlobalData, D>
-    for ScreencopyManagerState
+impl<D> GlobalDispatch2<ZwlrScreencopyManagerV1, D> for ScreencopyManagerGlobalData
 where
-    D: GlobalDispatch<ZwlrScreencopyManagerV1, ScreencopyManagerGlobalData>,
-    D: Dispatch<ZwlrScreencopyManagerV1, ()>,
+    D: Dispatch<ZwlrScreencopyManagerV1, ScreencopyManagerData>,
     D: Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
     D: ScreencopyHandler,
     D: 'static,
 {
     fn bind(
+        &self,
         state: &mut D,
         dh: &DisplayHandle,
         client: &Client,
         manager: New<ZwlrScreencopyManagerV1>,
-        _manager_state: &ScreencopyManagerGlobalData,
         data_init: &mut DataInit<'_, D>,
     ) {
-        let manager = data_init.init(manager, ());
+        let manager = data_init.init(manager, ScreencopyManagerData);
 
         let state = state.screencopy_state();
         let credentials = get_credentials_for_client(dh, client);
@@ -303,25 +304,23 @@ where
         state.queues.insert(manager.clone(), queue);
     }
 
-    fn can_view(client: Client, global_data: &ScreencopyManagerGlobalData) -> bool {
-        (global_data.filter)(&client)
+    fn can_view(&self, client: &Client) -> bool {
+        (self.filter)(client)
     }
 }
 
-impl<D> Dispatch<ZwlrScreencopyManagerV1, (), D> for ScreencopyManagerState
+impl<D> Dispatch2<ZwlrScreencopyManagerV1, D> for ScreencopyManagerData
 where
-    D: GlobalDispatch<ZwlrScreencopyManagerV1, ScreencopyManagerGlobalData>,
-    D: Dispatch<ZwlrScreencopyManagerV1, ()>,
     D: Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
     D: ScreencopyHandler,
     D: 'static,
 {
     fn request(
+        &self,
         state: &mut D,
         _client: &Client,
         manager: &ZwlrScreencopyManagerV1,
         request: zwlr_screencopy_manager_v1::Request,
-        _data: &(),
         _display: &DisplayHandle,
         data_init: &mut DataInit<'_, D>,
     ) {
@@ -443,10 +442,10 @@ where
     }
 
     fn destroyed(
+        &self,
         state: &mut D,
         _client: wayland_backend::server::ClientId,
         manager: &ZwlrScreencopyManagerV1,
-        _data: &(),
     ) {
         let state = state.screencopy_state();
 
@@ -483,23 +482,7 @@ pub trait ScreencopyHandler {
     fn screencopy_state(&mut self) -> &mut ScreencopyManagerState;
 }
 
-#[allow(missing_docs)]
-#[macro_export]
-macro_rules! delegate_screencopy {
-    ($(@<$( $lt:tt $( : $clt:tt $(+ $dlt:tt )* )? ),+>)? $ty: ty) => {
-        smithay::reexports::wayland_server::delegate_global_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
-            smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1: $crate::protocols::screencopy::ScreencopyManagerGlobalData
-        ] => $crate::protocols::screencopy::ScreencopyManagerState);
-
-        smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
-            smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1: ()
-        ] => $crate::protocols::screencopy::ScreencopyManagerState);
-
-        smithay::reexports::wayland_server::delegate_dispatch!($(@< $( $lt $( : $clt $(+ $dlt )* )? ),+ >)? $ty: [
-            smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1: $crate::protocols::screencopy::ScreencopyFrameState
-        ] => $crate::protocols::screencopy::ScreencopyManagerState);
-    };
-}
+// Delegated via the crate-wide delegate_dispatch2!(State); per-protocol macro no longer needed.
 
 #[derive(Clone)]
 pub struct ScreencopyFrameInfo {
@@ -518,18 +501,17 @@ pub enum ScreencopyFrameState {
     },
 }
 
-impl<D> Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState, D> for ScreencopyManagerState
+impl<D> Dispatch2<ZwlrScreencopyFrameV1, D> for ScreencopyFrameState
 where
-    D: Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameState>,
     D: ScreencopyHandler,
     D: 'static,
 {
     fn request(
+        &self,
         state: &mut D,
         _client: &Client,
         frame: &ZwlrScreencopyFrameV1,
         request: zwlr_screencopy_frame_v1::Request,
-        data: &ScreencopyFrameState,
         _display: &DisplayHandle,
         _data_init: &mut DataInit<'_, D>,
     ) {
@@ -541,7 +523,7 @@ where
             manager,
             info,
             copied,
-        } = data
+        } = self
         else {
             return;
         };
@@ -617,12 +599,12 @@ where
     }
 
     fn destroyed(
+        &self,
         state: &mut D,
         _client: wayland_backend::server::ClientId,
         frame: &ZwlrScreencopyFrameV1,
-        data: &ScreencopyFrameState,
     ) {
-        let ScreencopyFrameState::Pending { manager, .. } = data else {
+        let ScreencopyFrameState::Pending { manager, .. } = self else {
             return;
         };
 

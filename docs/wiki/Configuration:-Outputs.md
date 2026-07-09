@@ -322,15 +322,40 @@ Opts this output into HDR. When present, niri:
 
 With no `hdr` node on any output, color management is not advertised at all and behavior is unchanged.
 HDR signalling only works on the TTY backend, and requires a GPU/display that exposes the HDR
-connector properties (amdgpu and recent Intel do).
+connector properties (amdgpu, recent Intel, and nvidia do).
 
-The optional `reference-luminance` child (in cd/m²) is reserved for the upcoming color-managed
-compositing and currently has no effect.
+The optional `mode` property controls when the output is in HDR:
+
+- `mode="auto"` (the default): the output stays SDR and switches into HDR while a fullscreen
+  application shows HDR content (passthrough). Applications are told to prefer HDR (PQ / BT.2020)
+  once they are the active fullscreen window, so clients that listen for preference changes (SDL3
+  games, mpv with `--target-colorspace-hint`) switch to HDR when they go fullscreen. Entering and
+  leaving HDR is a modeset (expect a brief blank).
+- `mode="on"`: the output is always in HDR. SDR content (the desktop, windowed applications) is
+  composited into the HDR blend space, windowed HDR content displays correctly alongside it, and
+  applications are told to prefer HDR upfront — use this for games that only probe HDR support once
+  at startup. There is no modeset when entering or leaving fullscreen. Costs: SDR-only fullscreen
+  applications lose direct scanout on this output, and the cursor is rendered without the cursor
+  plane.
+
+The optional `reference-luminance` child (in cd/m²) is the luminance that SDR white (full white in
+an SDR application) is displayed at while the output is in HDR. Defaults to 203 (the BT.2408
+reference); raise it if the SDR desktop looks too dim next to HDR content.
+
+Screenshots and screencasts of HDR outputs are rendered in SDR; HDR application content appears
+washed out in them.
 
 ```kdl
 // Enable HDR on the internal display.
 output "eDP-1" {
     hdr
+}
+
+// Games that only probe HDR at startup: advertise HDR upfront.
+output "DP-1" {
+    hdr mode="on" {
+        reference-luminance 203
+    }
 }
 ```
 

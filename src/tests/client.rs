@@ -11,6 +11,7 @@ use calloop::EventLoop;
 use calloop_wayland_source::WaylandSource;
 use single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1;
 use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_color_management_output_v1::{self, WpColorManagementOutputV1};
+use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_color_management_surface_feedback_v1::{self, WpColorManagementSurfaceFeedbackV1};
 use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_color_management_surface_v1::WpColorManagementSurfaceV1;
 use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_color_manager_v1::{
     Primaries, RenderIntent, TransferFunction, WpColorManagerV1,
@@ -38,6 +39,8 @@ use wayland_client::protocol::wl_compositor::WlCompositor;
 use wayland_client::protocol::wl_display::WlDisplay;
 use wayland_client::protocol::wl_output::{self, WlOutput};
 use wayland_client::protocol::wl_registry::{self, WlRegistry};
+use wayland_client::protocol::wl_subcompositor::WlSubcompositor;
+use wayland_client::protocol::wl_subsurface::{self, WlSubsurface};
 use wayland_client::protocol::wl_surface::{self, WlSurface};
 use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
 
@@ -63,7 +66,21 @@ pub struct State {
     pub layer_shell: Option<ZwlrLayerShellV1>,
     pub spbm: Option<WpSinglePixelBufferManagerV1>,
     pub viewporter: Option<WpViewporter>,
+    pub subcompositor: Option<WlSubcompositor>,
     pub color_manager: Option<WpColorManagerV1>,
+    /// Feedback objects kept alive so preferred_changed events can arrive.
+    pub surface_feedbacks: Vec<WpColorManagementSurfaceFeedbackV1>,
+    /// Identities received in preferred_changed events, in order.
+    pub preferred_changed: Vec<u32>,
+    /// Identities received in wp_image_description_v1.ready events, in order.
+    pub ready_identities: Vec<u32>,
+    /// Named transfer function / primaries from the latest image description info exchange.
+    pub info_tf: Option<TransferFunction>,
+    pub info_primaries: Option<Primaries>,
+    /// Last received luminances info event as (min ×10000, max, reference white).
+    pub info_luminances: Option<(u32, u32, u32)>,
+    /// Last received target_luminance info event as (min ×10000, max).
+    pub info_target_luminance: Option<(u32, u32)>,
 
     pub windows: Vec<Window>,
     pub layers: Vec<LayerSurface>,
@@ -190,7 +207,15 @@ impl Client {
             layer_shell: None,
             spbm: None,
             viewporter: None,
+            subcompositor: None,
             color_manager: None,
+            surface_feedbacks: Vec::new(),
+            preferred_changed: Vec::new(),
+            ready_identities: Vec::new(),
+            info_tf: None,
+            info_primaries: None,
+            info_luminances: None,
+            info_target_luminance: None,
             windows: Vec::new(),
             layers: Vec::new(),
         };
@@ -234,16 +259,55 @@ impl Client {
     /// and query its information.
     pub fn probe_output_color_management(&mut self) {
         let manager = self.state.color_manager.clone().expect("manager not bound");
-        let output = self
-            .state
-            .outputs
-            .keys()
-            .next()
-            .expect("no output")
-            .clone();
+        let output = self.state.outputs.keys().next().expect("no output").clone();
 
         let output_cm = manager.get_output(&output, &self.qh, ());
         let image = output_cm.get_image_description(&self.qh, ());
+        let _info = image.get_information(&self.qh, ());
+        self.connection.flush().unwrap();
+    }
+
+    /// Creates a subsurface of `parent` with a buffer attached and committed, like winewayland does
+    /// for Vulkan swapchain presentation. Returns the subsurface's wl_surface.
+    pub fn create_committed_subsurface(&mut self, parent: &WlSurface) -> WlSurface {
+        let compositor = self.state.compositor.as_ref().unwrap();
+        let subcompositor = self
+            .state
+            .subcompositor
+            .as_ref()
+            .expect("no wl_subcompositor");
+        let spbm = self.state.spbm.as_ref().unwrap();
+
+        let surface = compositor.create_surface(&self.qh, ());
+        let _subsurface = subcompositor.get_subsurface(&surface, parent, &self.qh, ());
+        let buffer = spbm.create_u32_rgba_buffer(0, 0, 0, u32::MAX, &self.qh, ());
+        surface.attach(Some(&buffer), 0, 0);
+        surface.commit();
+        parent.commit();
+        self.connection.flush().unwrap();
+        surface
+    }
+
+    /// Drives the color-management requests an HDR-aware client (SDL3) sends at startup: create a
+    /// surface feedback object and query the preferred image description and its information. The
+    /// feedback object is kept alive so later preferred_changed events arrive.
+    pub fn probe_surface_preferred(&mut self, surface: &WlSurface) {
+        let manager = self.state.color_manager.clone().expect("manager not bound");
+        let feedback = manager.get_surface_feedback(surface, &self.qh, ());
+        let image = feedback.get_preferred(&self.qh, ());
+        let _info = image.get_information(&self.qh, ());
+        self.state.surface_feedbacks.push(feedback);
+        self.connection.flush().unwrap();
+    }
+
+    /// Re-queries the preferred description (without creating a new feedback object) and its info.
+    pub fn requery_preferred(&mut self) {
+        let feedback = self
+            .state
+            .surface_feedbacks
+            .last()
+            .expect("no feedback object");
+        let image = feedback.get_preferred(&self.qh, ());
         let _info = image.get_information(&self.qh, ());
         self.connection.flush().unwrap();
     }
@@ -270,6 +334,79 @@ impl Client {
 
         let cm_surface = manager.get_surface(surface, &self.qh, ());
         cm_surface.set_image_description(&image, intent);
+        self.connection.flush().unwrap();
+    }
+
+    /// Like [`create_and_attach_hdr_description`](Self::create_and_attach_hdr_description), but
+    /// additionally sets BT.2020 mastering display primaries — a target color volume that
+    /// requires the `extended_target_volume` feature whenever it exceeds the container
+    /// primaries.
+    pub fn create_and_attach_hdr_description_with_target_volume(
+        &mut self,
+        surface: &WlSurface,
+        tf: TransferFunction,
+        primaries: Primaries,
+        intent: RenderIntent,
+    ) {
+        let manager = self.state.color_manager.clone().expect("manager not bound");
+
+        let creator = manager.create_parametric_creator(&self.qh, ());
+        creator.set_tf_named(tf);
+        creator.set_primaries_named(primaries);
+        // BT.2020 primaries and D65 white point, in protocol wire units (xy * 1e6).
+        creator.set_mastering_display_primaries(
+            708_000, 292_000, 170_000, 797_000, 131_000, 46_000, 312_700, 329_000,
+        );
+        creator.set_mastering_luminance(50, 1000);
+        let image = creator.create(&self.qh, ());
+
+        let cm_surface = manager.get_surface(surface, &self.qh, ());
+        cm_surface.set_image_description(&image, intent);
+        self.connection.flush().unwrap();
+    }
+
+    /// Builds a parametric image description using raw chromaticity coordinates
+    /// (`set_primaries`) instead of a named set, and attaches it to a surface.
+    pub fn create_and_attach_custom_primaries_description(
+        &mut self,
+        surface: &WlSurface,
+        tf: TransferFunction,
+        primaries: [(i32, i32); 4],
+        intent: RenderIntent,
+    ) {
+        let manager = self.state.color_manager.clone().expect("manager not bound");
+
+        let creator = manager.create_parametric_creator(&self.qh, ());
+        creator.set_tf_named(tf);
+        let [r, g, b, w] = primaries;
+        creator.set_primaries(r.0, r.1, g.0, g.1, b.0, b.1, w.0, w.1);
+        let image = creator.create(&self.qh, ());
+
+        let cm_surface = manager.get_surface(surface, &self.qh, ());
+        cm_surface.set_image_description(&image, intent);
+        self.connection.flush().unwrap();
+    }
+
+    /// Drives the requests a Windows-scRGB client (winewayland in scRGB mode) sends: create the
+    /// pre-defined scRGB image description and attach it to a surface.
+    pub fn create_and_attach_scrgb_description(&mut self, surface: &WlSurface) {
+        let manager = self.state.color_manager.clone().expect("manager not bound");
+
+        let image = manager.create_windows_scrgb(&self.qh, ());
+        let cm_surface = manager.get_surface(surface, &self.qh, ());
+        cm_surface.set_image_description(&image, RenderIntent::Perceptual);
+        self.connection.flush().unwrap();
+    }
+
+    /// Drives the requests winewayland sends for HDR10 (VK_COLOR_SPACE_HDR10_ST2084_EXT)
+    /// swapchains: create the pre-defined Windows-BT.2100 image description (v3) and attach it
+    /// to a surface.
+    pub fn create_and_attach_bt2100_description(&mut self, surface: &WlSurface) {
+        let manager = self.state.color_manager.clone().expect("manager not bound");
+
+        let image = manager.create_windows_bt2100(&self.qh, ());
+        let cm_surface = manager.get_surface(surface, &self.qh, ());
+        cm_surface.set_image_description(&image, RenderIntent::Perceptual);
         self.connection.flush().unwrap();
     }
 
@@ -571,6 +708,9 @@ impl Dispatch<WlRegistry, ()> for State {
                 } else if interface == WpViewporter::interface().name {
                     let version = min(version, WpViewporter::interface().version);
                     state.viewporter = Some(registry.bind(name, version, qh, ()));
+                } else if interface == WlSubcompositor::interface().name {
+                    let version = min(version, WlSubcompositor::interface().version);
+                    state.subcompositor = Some(registry.bind(name, version, qh, ()));
                 } else if interface == WpColorManagerV1::interface().name {
                     let version = min(version, WpColorManagerV1::interface().version);
                     state.color_manager = Some(registry.bind(name, version, qh, ()));
@@ -621,6 +761,32 @@ impl Dispatch<WlCompositor, ()> for State {
         _state: &mut Self,
         _proxy: &WlCompositor,
         _event: <WlCompositor as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        unreachable!()
+    }
+}
+
+impl Dispatch<WlSubcompositor, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlSubcompositor,
+        _event: <WlSubcompositor as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        unreachable!()
+    }
+}
+
+impl Dispatch<WlSubsurface, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlSubsurface,
+        _event: wl_subsurface::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
@@ -860,27 +1026,84 @@ impl Dispatch<WpColorManagementOutputV1, ()> for State {
 
 impl Dispatch<WpImageDescriptionV1, ()> for State {
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         _proxy: &WpImageDescriptionV1,
-        _event: wp_image_description_v1::Event,
+        event: wp_image_description_v1::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        // ready / failed — ignored for these tests.
+        match event {
+            // v1 event; sent to clients binding wp_color_manager_v1 version 1.
+            wp_image_description_v1::Event::Ready { identity } => {
+                state.ready_identities.push(identity);
+            }
+            // v2+ replacement with a 64-bit identity.
+            wp_image_description_v1::Event::Ready2 {
+                identity_hi,
+                identity_lo,
+            } => {
+                assert_eq!(identity_hi, 0, "niri's identities fit in 32 bits");
+                state.ready_identities.push(identity_lo);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WpColorManagementSurfaceFeedbackV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _proxy: &WpColorManagementSurfaceFeedbackV1,
+        event: wp_color_management_surface_feedback_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wp_color_management_surface_feedback_v1::Event::PreferredChanged { identity } => {
+                state.preferred_changed.push(identity);
+            }
+            wp_color_management_surface_feedback_v1::Event::PreferredChanged2 {
+                identity_hi,
+                identity_lo,
+            } => {
+                assert_eq!(identity_hi, 0, "niri's identities fit in 32 bits");
+                state.preferred_changed.push(identity_lo);
+            }
+            _ => {}
+        }
     }
 }
 
 impl Dispatch<WpImageDescriptionInfoV1, ()> for State {
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         _proxy: &WpImageDescriptionInfoV1,
-        _event: wp_image_description_info_v1::Event,
+        event: wp_image_description_info_v1::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        // primaries_named / tf_named / done / ... — ignored.
+        match event {
+            wp_image_description_info_v1::Event::TfNamed { tf } => {
+                state.info_tf = tf.into_result().ok();
+            }
+            wp_image_description_info_v1::Event::PrimariesNamed { primaries } => {
+                state.info_primaries = primaries.into_result().ok();
+            }
+            wp_image_description_info_v1::Event::Luminances {
+                min_lum,
+                max_lum,
+                reference_lum,
+            } => {
+                state.info_luminances = Some((min_lum, max_lum, reference_lum));
+            }
+            wp_image_description_info_v1::Event::TargetLuminance { min_lum, max_lum } => {
+                state.info_target_luminance = Some((min_lum, max_lum));
+            }
+            _ => {}
+        }
     }
 }
 
