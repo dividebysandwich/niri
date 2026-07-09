@@ -31,10 +31,10 @@ use smithay::backend::drm::{
 use smithay::backend::egl::context::ContextPriority;
 use smithay::backend::egl::{EGLDevice, EGLDisplay};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
+use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::multigpu::gbm::GbmGlesBackend;
 use smithay::backend::renderer::multigpu::{GpuManager, MultiFrame, MultiRenderer};
-use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::{DebugFlags, ImportDma, ImportEgl, RendererSuper};
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
@@ -68,8 +68,8 @@ use super::{IpcOutputMap, OutputHdrCaps, RenderResult};
 use crate::backend::OutputId;
 use crate::frame_clock::FrameClock;
 use smithay::wayland::color::management::{
-    Chromaticities, ImageDescription, Primaries as CmPrimaries, PrimariesOption as CmPrimariesOption,
-    TransferFunction as CmTransferFunction,
+    Chromaticities, ImageDescription, Primaries as CmPrimaries,
+    PrimariesOption as CmPrimariesOption, TransferFunction as CmTransferFunction,
 };
 
 use crate::render_helpers::blend::{self, set_frame_blend, DEFAULT_REFERENCE_LUMINANCE};
@@ -109,7 +109,6 @@ const HDR_TEN_BIT_COLOR_FORMATS: [Fourcc; 4] = [
     Fourcc::Argb2101010,
     Fourcc::Abgr2101010,
 ];
-
 
 pub struct Tty {
     config: Rc<RefCell<Config>>,
@@ -1628,7 +1627,11 @@ impl Tty {
                 compositor.reset_buffers();
 
                 if render_ok {
-                    debug!(connector = connector_name, ?format, "keeping renderable 10-bit format");
+                    debug!(
+                        connector = connector_name,
+                        ?format,
+                        "keeping renderable 10-bit format"
+                    );
                     hdr_color_formats.push(format);
                 }
             }
@@ -1729,8 +1732,8 @@ impl Tty {
         };
         debug!("DRM compositor created");
 
-        // Do one throwaway `render_frame` — the exact path that would fail — and, if it errors, 
-        // recreate the compositor with 8-bit formats. HDR signalling still works on an 8-bit 
+        // Do one throwaway `render_frame` — the exact path that would fail — and, if it errors,
+        // recreate the compositor with 8-bit formats. HDR signalling still works on an 8-bit
         // framebuffer, just with banding. Only runs for 10-bit HDR outputs, once per connector at setup.
         if using_10bit_formats {
             let trial_ok = match self.gpu_manager.renderer(
@@ -2241,6 +2244,7 @@ impl Tty {
                     mastering_primaries: None,
                     luminances: None,
                     windows_scrgb: false,
+                    windows_bt2100: false,
                 });
                 ConnectorColorState {
                     colorspace: Colorspace::Bt2020Rgb,
@@ -3712,9 +3716,10 @@ fn build_hdr_metadata(desc: &ImageDescription, edid: &EdidHdrInfo) -> HdrOutputM
     // ST 2086 mastering primaries: the client's target color volume, which may exceed the
     // container primaries (extended target volume). Without one, the target defaults to the
     // container primaries per the color-management protocol.
-    let chroma = desc
-        .mastering_primaries
-        .unwrap_or_else(|| Chromaticities::from_option(desc.primaries).unwrap_or(Chromaticities::from_named(CmPrimaries::Srgb)));
+    let chroma = desc.mastering_primaries.unwrap_or_else(|| {
+        Chromaticities::from_option(desc.primaries)
+            .unwrap_or(Chromaticities::from_named(CmPrimaries::Srgb))
+    });
     // Protocol wire units (xy * 1e6) -> CTA-861.3 units (xy * 50000).
     let coord = |(x, y): (i32, i32)| CtaCoordinate::from_xy(f64::from(x) / 1e6, f64::from(y) / 1e6);
 
@@ -3937,6 +3942,7 @@ mod tests {
             mastering_primaries: None,
             luminances: None,
             windows_scrgb: false,
+            windows_bt2100: false,
         };
         let edid = EdidHdrInfo {
             pq: true,
@@ -4004,6 +4010,7 @@ mod tests {
             mastering_primaries: None,
             luminances: None,
             windows_scrgb: false,
+            windows_bt2100: false,
         };
 
         // Without mastering primaries the infoframe carries the container primaries
@@ -4023,7 +4030,10 @@ mod tests {
         };
         let meta = build_hdr_metadata(&desc, &EdidHdrInfo::default());
         // Display P3 red is (0.680, 0.320): x = 0.680 * 50000 = 34000.
-        assert_eq!(meta.display_primaries[0], CtaCoordinate { x: 34000, y: 16000 });
+        assert_eq!(
+            meta.display_primaries[0],
+            CtaCoordinate { x: 34000, y: 16000 }
+        );
         assert_eq!(meta.white_point, CtaCoordinate::D65_WHITE);
     }
 

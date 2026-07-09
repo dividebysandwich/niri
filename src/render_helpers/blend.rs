@@ -118,7 +118,11 @@ impl FrameBlendState {
             Uniform::new("niri_ref_lum_scale", scale),
             Uniform::new(
                 "niri_scrgb",
-                if content == ContentColor::Scrgb { 1.0f32 } else { 0.0 },
+                if content == ContentColor::Scrgb {
+                    1.0f32
+                } else {
+                    0.0
+                },
             ),
         ]
     }
@@ -236,7 +240,12 @@ impl<R: Renderer> BlendSurfaceRenderElement<R> {
 fn adjust_tex_program_for_content(
     frame: &mut GlesFrame,
     content: ContentColor,
-) -> Option<Option<(smithay::backend::renderer::gles::GlesTexProgram, Vec<Uniform<'static>>)>> {
+) -> Option<
+    Option<(
+        smithay::backend::renderer::gles::GlesTexProgram,
+        Vec<Uniform<'static>>,
+    )>,
+> {
     match content {
         ContentColor::Sdr => None,
         ContentColor::BlendSpace => {
