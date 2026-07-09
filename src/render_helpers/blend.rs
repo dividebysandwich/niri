@@ -65,6 +65,14 @@ impl FrameBlendState {
         }
     }
 
+    pub fn set_sdr_capture(renderer: &mut GlesRenderer, reference_luminance: f64) {
+        let state = Self::get(renderer);
+        state.hdr_pq.set(false);
+        state
+            .ref_lum_scale
+            .set((reference_luminance / 10000.) as f32);
+    }
+
     fn values_from_frame(frame: &GlesFrame) -> (bool, f32) {
         let state: &Self = frame
             .egl_context()
@@ -74,19 +82,40 @@ impl FrameBlendState {
         (state.hdr_pq.get(), state.ref_lum_scale.get())
     }
 
+    pub fn is_hdr_frame(frame: &GlesFrame) -> bool {
+        Self::values_from_frame(frame).0
+    }
+
+    pub fn ref_lum_scale(frame: &GlesFrame) -> f32 {
+        Self::values_from_frame(frame).1
+    }
+
+    /// The `niri_blend` uniform values for content already rendered in the frame blend space.
+    pub fn uniforms_for_blend_space(frame: &GlesFrame) -> [Uniform<'static>; 3] {
+        let (_, scale) = Self::values_from_frame(frame);
+        [
+            Uniform::new("niri_hdr_pq", 0.0f32),
+            Uniform::new("niri_ref_lum_scale", scale),
+            Uniform::new("niri_hdr_to_sdr", 0.0f32),
+        ]
+    }
+
     /// The `niri_blend` uniform values for a draw of SDR content in this frame.
-    pub fn uniforms(frame: &GlesFrame) -> [Uniform<'static>; 2] {
+    pub fn uniforms(frame: &GlesFrame) -> [Uniform<'static>; 3] {
         Self::uniforms_for_content(frame, false)
     }
 
     /// The `niri_blend` uniform values for a draw in this frame; `content_hdr` exempts
-    /// content already encoded in the blend space.
-    pub fn uniforms_for_content(frame: &GlesFrame, content_hdr: bool) -> [Uniform<'static>; 2] {
+    /// content already encoded in the blend space. When that HDR content is drawn into an SDR
+    /// frame, it is converted back to SDR for capture buffers.
+    pub fn uniforms_for_content(frame: &GlesFrame, content_hdr: bool) -> [Uniform<'static>; 3] {
         let (hdr_pq, scale) = Self::values_from_frame(frame);
-        let apply = hdr_pq && !content_hdr;
+        let sdr_to_hdr = hdr_pq && !content_hdr;
+        let hdr_to_sdr = !hdr_pq && content_hdr;
         [
-            Uniform::new("niri_hdr_pq", if apply { 1.0f32 } else { 0.0 }),
+            Uniform::new("niri_hdr_pq", if sdr_to_hdr { 1.0f32 } else { 0.0 }),
             Uniform::new("niri_ref_lum_scale", scale),
+            Uniform::new("niri_hdr_to_sdr", if hdr_to_sdr { 1.0f32 } else { 0.0 }),
         ]
     }
 }
@@ -111,6 +140,7 @@ pub fn set_frame_blend(renderer: &mut GlesRenderer, reference_luminance: Option<
                     vec![
                         Uniform::new("niri_hdr_pq", 1.0f32),
                         Uniform::new("niri_ref_lum_scale", scale),
+                        Uniform::new("niri_hdr_to_sdr", 0.0f32),
                     ],
                 )));
             } else {
@@ -124,6 +154,14 @@ pub fn set_frame_blend(renderer: &mut GlesRenderer, reference_luminance: Option<
             renderer.set_solid_color_transform(None);
         }
     }
+}
+
+/// Configures the renderer for rendering into an SDR capture buffer, while preserving the
+/// reference luminance needed to convert HDR content back to SDR.
+pub fn set_sdr_capture_blend(renderer: &mut GlesRenderer, reference_luminance: f64) {
+    FrameBlendState::set_sdr_capture(renderer, reference_luminance);
+    renderer.set_default_tex_program_override(None);
+    renderer.set_solid_color_transform(None);
 }
 
 /// CPU counterpart of the shaders' `niri_blend`: encodes an electrical sRGB premultiplied
@@ -248,8 +286,20 @@ impl RenderElement<GlesRenderer> for BlendSurfaceRenderElement<GlesRenderer> {
         opaque_regions: &[Rectangle<i32, Physical>],
         cache: Option<&UserDataMap>,
     ) -> Result<(), GlesError> {
-        let saved = if self.content_hdr {
-            frame.take_tex_program_override()
+        let saved = if self.content_hdr && FrameBlendState::is_hdr_frame(frame) {
+            Some(frame.take_tex_program_override())
+        } else if self.content_hdr {
+            let saved = frame.take_tex_program_override();
+            if let Some(program) = Shaders::get_from_frame(frame).texture_hdr_to_sdr.clone() {
+                let ref_lum_scale = FrameBlendState::ref_lum_scale(frame);
+                frame.override_default_tex_program(
+                    program,
+                    vec![Uniform::new("niri_ref_lum_scale", ref_lum_scale)],
+                );
+            } else {
+                warn!("HDR-to-SDR texture shader missing; HDR capture will render raw");
+            }
+            Some(saved)
         } else {
             None
         };
@@ -262,7 +312,7 @@ impl RenderElement<GlesRenderer> for BlendSurfaceRenderElement<GlesRenderer> {
             opaque_regions,
             cache,
         );
-        if saved.is_some() {
+        if let Some(saved) = saved {
             frame.set_tex_program_override(saved);
         }
         res
@@ -286,13 +336,28 @@ impl<'render> RenderElement<TtyRenderer<'render>>
         cache: Option<&UserDataMap>,
     ) -> Result<(), TtyRendererError<'render>> {
         let gles_frame = frame.as_gles_frame();
-        let saved = if self.content_hdr {
-            gles_frame.take_tex_program_override()
+        let saved = if self.content_hdr && FrameBlendState::is_hdr_frame(gles_frame) {
+            Some(gles_frame.take_tex_program_override())
+        } else if self.content_hdr {
+            let saved = gles_frame.take_tex_program_override();
+            if let Some(program) = Shaders::get_from_frame(gles_frame)
+                .texture_hdr_to_sdr
+                .clone()
+            {
+                let ref_lum_scale = FrameBlendState::ref_lum_scale(gles_frame);
+                gles_frame.override_default_tex_program(
+                    program,
+                    vec![Uniform::new("niri_ref_lum_scale", ref_lum_scale)],
+                );
+            } else {
+                warn!("HDR-to-SDR texture shader missing; HDR capture will render raw");
+            }
+            Some(saved)
         } else {
             None
         };
         let res = RenderElement::draw(&self.inner, frame, src, dst, damage, opaque_regions, cache);
-        if saved.is_some() {
+        if let Some(saved) = saved {
             frame.as_gles_frame().set_tex_program_override(saved);
         }
         res

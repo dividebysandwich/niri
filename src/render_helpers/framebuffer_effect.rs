@@ -392,8 +392,8 @@ impl RenderElement<GlesRenderer> for FramebufferEffectElement {
         let program = Shaders::get_from_frame(frame).postprocess_and_clip.clone();
         let uniforms = program.is_some().then(|| {
             let mut uniforms = self.compute_uniforms(crop, frame.transformation()).to_vec();
-            // The sampled framebuffer content is already in the output blend space.
-            uniforms.extend(FrameBlendState::uniforms_for_content(frame, true));
+            // The sampled framebuffer content is already in the frame blend space.
+            uniforms.extend(FrameBlendState::uniforms_for_blend_space(frame));
             uniforms
         });
         let uniforms = uniforms.as_ref().map_or(&[][..], |x| &x[..]);
