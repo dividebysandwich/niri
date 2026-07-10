@@ -148,7 +148,8 @@ use crate::protocols::ext_workspace::{self, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
 use smithay::wayland::color::management::{
     ColorManagementState, ColorManagementSurfaceCachedState, Feature, ImageDescription,
-    Primaries as CmPrimaries, RenderIntent, TransferFunction as CmTransferFunction,
+    Primaries as CmPrimaries, PrimariesOption as CmPrimariesOption, RenderIntent,
+    TransferFunction as CmTransferFunction,
 };
 
 use crate::protocols::gamma_control::GammaControlManagerState;
@@ -2291,16 +2292,22 @@ impl Niri {
         let reference_luminance = hdr.reference_luminance.map(|v| v.0).unwrap_or(203.) as u32;
         ImageDescription {
             transfer: CmTransferFunction::St2084Pq,
-            primaries: CmPrimaries::Bt2020,
+            primaries: CmPrimariesOption {
+                named: Some(CmPrimaries::Bt2020),
+                values: None,
+            },
             max_cll: (caps.max_luminance > 0).then(|| u32::from(caps.max_luminance)),
             max_fall: (caps.max_frame_avg_luminance > 0)
                 .then(|| u32::from(caps.max_frame_avg_luminance)),
             mastering_luminance: None,
+            mastering_primaries: None,
             luminances: Some((
                 u32::from(caps.min_luminance),
                 max_luminance,
                 reference_luminance,
             )),
+            windows_scrgb: false,
+            windows_bt2100: false,
         }
     }
 
@@ -2554,17 +2561,31 @@ impl Niri {
         let advertise_color_management = config.borrow().outputs.0.iter().any(|o| o.hdr.is_some());
         let color_management_state = ColorManagementState::new::<State, _>(
             &display_handle,
+            // ext_linear is what Mesa's Vulkan WSI needs (in combination with sRGB primaries
+            // and extended_target_volume) to advertise scRGB
+            // (VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT) swapchains, which in turn is what
+            // Windows games running under Proton probe for scRGB HDR support; see
+            // `render_helpers::blend` for how the linear content is composited.
             [
                 CmTransferFunction::Srgb,
                 CmTransferFunction::Gamma22,
+                CmTransferFunction::ExtLinear,
                 CmTransferFunction::St2084Pq,
             ],
             [CmPrimaries::Srgb, CmPrimaries::Bt2020],
             // Mastering-metadata features so HDR clients can convey it without erroring.
+            // Extended target volume: the mastering metadata is forwarded to the sink (HDR
+            // infoframe) rather than used for gamut mapping, so target volumes exceeding the
+            // primary volume are fine. Windows scRGB: rendered with a dedicated blend-space
+            // encode (see `render_helpers::blend`).
             [
                 Feature::Parametric,
                 Feature::SetMasteringDisplayPrimaries,
+                Feature::SetPrimaries,
+                Feature::ExtendedTargetVolume,
                 Feature::SetLuminances,
+                Feature::WindowsScrgb,
+                Feature::WindowsBt2100,
             ],
             [RenderIntent::Perceptual],
             move |_client| advertise_color_management,

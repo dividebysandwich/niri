@@ -915,7 +915,6 @@ impl XdgShellHandler for State {
     }
 }
 
-
 impl XdgDecorationHandler for State {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
         // If we want CSD, we hide this global altogether.
