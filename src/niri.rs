@@ -2358,7 +2358,14 @@ impl Niri {
         match hdr.mode {
             HdrMode::On => Self::hdr_blend_description(&hdr, caps),
             HdrMode::Auto => {
-                let is_active_fullscreen = window.sizing_mode().is_fullscreen()
+                // Count a window as fullscreen once fullscreen has been requested of it, not only
+                // after it acks that configure. A window that maps (or re-maps) straight into
+                // fullscreen is otherwise told to prefer sRGB until its ack commits, and clients
+                // that check HDR support at that moment (gamescope nested, which unmaps and
+                // re-maps its toplevel while the game inside switches windows) see no HDR.
+                let is_fullscreen = window.sizing_mode().is_fullscreen()
+                    || window.pending_sizing_mode().is_fullscreen();
+                let is_active_fullscreen = is_fullscreen
                     && self
                         .layout
                         .monitor_for_output(output)

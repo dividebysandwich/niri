@@ -163,6 +163,51 @@ fn feedback_preferred_is_pq_with_mode_on() {
     assert_eq!(client.state.info_primaries, Some(Primaries::Bt2020));
 }
 
+/// Fixture whose output is `hdr mode="auto"` (the default) with backend HDR capabilities injected.
+fn fixture_with_hdr_mode_auto() -> Fixture {
+    let mut f = fixture_with_hdr();
+    f.add_output(1, (1920, 1080));
+    f.niri_output(1)
+        .user_data()
+        .insert_if_missing(|| OutputHdrCaps {
+            supported: true,
+            max_luminance: 800,
+            min_luminance: 100,
+            max_frame_avg_luminance: 600,
+        });
+    f
+}
+
+#[test]
+fn feedback_preferred_is_pq_before_fullscreen_ack() {
+    // gamescope (nested) unmaps its toplevel while the game inside switches windows, then maps
+    // it again and requests fullscreen. It re-reads the preferred description right away, before
+    // acking the fullscreen configure, and the game decides on HDR at that moment. In auto mode a
+    // window that has been told to go fullscreen must already prefer PQ.
+    let mut f = fixture_with_hdr_mode_auto();
+
+    let id = f.add_client();
+    let window = f.client(id).create_window();
+    let surface = window.surface.clone();
+    window.commit();
+    f.roundtrip(id);
+    let window = f.client(id).window(&surface);
+    window.attach_new_buffer();
+    window.ack_last_and_commit();
+    f.double_roundtrip(id);
+
+    // Request fullscreen, but don't ack the resulting configure yet.
+    f.client(id).window(&surface).set_fullscreen(None);
+    f.double_roundtrip(id);
+
+    f.client(id).probe_surface_preferred(&surface);
+    f.double_roundtrip(id);
+
+    let client = f.client(id);
+    assert_eq!(client.state.info_tf, Some(TransferFunction::St2084Pq));
+    assert_eq!(client.state.info_primaries, Some(Primaries::Bt2020));
+}
+
 #[test]
 fn preferred_identities_are_stable() {
     let mut f = fixture_with_hdr_mode_on();
