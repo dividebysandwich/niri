@@ -8,7 +8,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{io, mem};
 
 use anyhow::{anyhow, bail, ensure, Context};
@@ -403,6 +403,15 @@ struct TtyOutputState {
     crtc: crtc::Handle,
 }
 
+/// How long an output stays in HDR after the fullscreen window stops showing HDR content.
+///
+/// Switching the connector between HDR and SDR is a modeset. Entering HDR changes the output's
+/// preferred image description, which makes clients such as mpv rebuild their swapchain, and
+/// for a frame or so the surface carries no image description. Without a grace period that
+/// blip drops the output back to SDR and then into HDR again: three modesets (blanks) instead
+/// of one on every entry into fullscreen HDR playback.
+const HDR_EXIT_GRACE: Duration = Duration::from_secs(2);
+
 struct Surface {
     name: OutputName,
     compositor: GbmDrmCompositor,
@@ -422,6 +431,11 @@ struct Surface {
     /// = SDR. Blend changes alter shader output without damaging anything, so a change forces
     /// a full redraw.
     last_blend: Option<Option<f64>>,
+    /// The last HDR image description seen on the fullscreen window, and when; see
+    /// [`HDR_EXIT_GRACE`].
+    hdr_last_seen: Option<(ImageDescription, Instant)>,
+    /// Whether a redraw is already scheduled for the end of the current grace period.
+    hdr_grace_timer_armed: bool,
     dmabuf_feedback: Option<SurfaceDmabufFeedback>,
     gamma_props: Option<GammaProps>,
     /// Gamma change to apply upon session resume.
@@ -1858,6 +1872,8 @@ impl Tty {
             max_bpc_range,
             failed_color_state: None,
             last_blend: None,
+            hdr_last_seen: None,
+            hdr_grace_timer_armed: false,
             compositor,
             dmabuf_feedback,
             gamma_props,
@@ -2225,9 +2241,36 @@ impl Tty {
                 .unwrap_or(DEFAULT_REFERENCE_LUMINANCE);
             drop(config);
 
-            let hdr_desc = hdr_allowed
+            let mut hdr_desc = hdr_allowed
                 .then(|| niri.output_hdr_image_description(output))
                 .flatten();
+            if let Some(desc) = hdr_desc {
+                surface.hdr_last_seen = Some((desc, Instant::now()));
+                surface.hdr_grace_timer_armed = false;
+            } else if let Some((desc, seen)) = surface.hdr_last_seen {
+                // Ride out a momentary loss of the HDR description while the same kind of
+                // content stays fullscreen; leaving fullscreen drops out of HDR right away.
+                let remaining = HDR_EXIT_GRACE.saturating_sub(seen.elapsed());
+                if hdr_allowed && niri.output_has_fullscreen_window(output) && !remaining.is_zero()
+                {
+                    hdr_desc = Some(desc);
+                    // Re-evaluate once the grace period is over, even if nothing else redraws.
+                    if !surface.hdr_grace_timer_armed {
+                        surface.hdr_grace_timer_armed = true;
+                        let output = output.clone();
+                        let _ = niri.event_loop.insert_source(
+                            Timer::from_duration(remaining + Duration::from_millis(10)),
+                            move |_, _, state| {
+                                state.niri.queue_redraw(&output);
+                                TimeoutAction::Drop
+                            },
+                        );
+                    }
+                } else {
+                    surface.hdr_last_seen = None;
+                    surface.hdr_grace_timer_armed = false;
+                }
+            }
             let blend_hdr = hdr_allowed && (always_on || hdr_desc.is_some());
 
             let desired = if blend_hdr {

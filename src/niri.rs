@@ -2254,6 +2254,14 @@ impl Niri {
     /// The whole surface tree is searched, not just the toplevel surface: winewayland (Proton)
     /// presents Vulkan content on a subsurface of the toplevel and attaches the HDR image
     /// description there.
+    /// Whether `output` is showing a fullscreen window.
+    pub fn output_has_fullscreen_window(&self, output: &Output) -> bool {
+        self.layout
+            .monitor_for_output(output)
+            .and_then(|mon| mon.active_window())
+            .is_some_and(|window| window.sizing_mode().is_fullscreen())
+    }
+
     pub fn output_hdr_image_description(&self, output: &Output) -> Option<ImageDescription> {
         let window = self.layout.monitor_for_output(output)?.active_window()?;
         if !window.sizing_mode().is_fullscreen() {
