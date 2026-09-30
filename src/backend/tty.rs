@@ -1601,7 +1601,17 @@ impl Tty {
                             [0.; 4],
                             FrameFlags::empty(),
                         ) {
-                            Ok(_) => true,
+                            Ok(res) => {
+                                // The probe's buffers are released right below; wait for the
+                                // GPU to finish rendering into them first.
+                                if let PrimaryPlaneElement::Swapchain(element) = res.primary_element
+                                {
+                                    if let Err(err) = element.sync.wait() {
+                                        warn!("error waiting for the 10-bit probe frame: {err:?}");
+                                    }
+                                }
+                                true
+                            }
                             Err(err) => {
                                 warn!(
                                     connector = connector_name,
@@ -1749,7 +1759,16 @@ impl Tty {
                         [0.; 4],
                         FrameFlags::empty(),
                     ) {
-                        Ok(_) => true,
+                        Ok(res) => {
+                            // The trial's buffers are released right below; wait for the GPU
+                            // to finish rendering into them first.
+                            if let PrimaryPlaneElement::Swapchain(element) = res.primary_element {
+                                if let Err(err) = element.sync.wait() {
+                                    warn!("error waiting for the 10-bit probe frame: {err:?}");
+                                }
+                            }
+                            true
+                        }
                         Err(err) => {
                             warn!(
                                 connector = connector_name,
