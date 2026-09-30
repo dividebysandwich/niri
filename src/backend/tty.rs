@@ -2282,11 +2282,14 @@ impl Tty {
         };
 
         // A blend-space change alters what every shader outputs without any element damage;
-        // force a full redraw.
+        // force a full redraw. Only drop the damage history: reset_buffers() would free the
+        // whole swapchain here, in the middle of rendering, while earlier frames may still be
+        // in flight on the GPU or queued for scanout - the format doesn't change, so there is
+        // nothing to reallocate.
         let blend = blend_hdr.then_some(reference_luminance);
         if surface.last_blend != Some(blend) {
             surface.last_blend = Some(blend);
-            surface.compositor.reset_buffers();
+            surface.compositor.reset_buffer_ages();
         }
 
         let mut renderer = match self.gpu_manager.renderer(
