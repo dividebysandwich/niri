@@ -336,7 +336,9 @@ The optional `mode` property controls when the output is in HDR:
   applications are told to prefer HDR upfront — use this for games that only probe HDR support once
   at startup. There is no modeset when entering or leaving fullscreen. Costs: SDR-only fullscreen
   applications lose direct scanout on this output, and the cursor is rendered without the cursor
-  plane.
+  plane. Connector metadata uses fixed BT.2020 primaries and EDID luminance values (or
+  fallback values when unavailable), so fullscreen content changes do not change HDR signalling.
+  Per-content mastering metadata is forwarded only in auto mode.
 
 The optional `reference-luminance` child (in cd/m²) is the luminance that SDR white (full white in
 an SDR application) is displayed at while the output is in HDR. Defaults to 203 (the BT.2408
