@@ -2231,8 +2231,12 @@ impl Tty {
             let blend_hdr = hdr_allowed && (always_on || hdr_desc.is_some());
 
             let desired = if blend_hdr {
-                // Without fullscreen HDR content, the metadata comes from the sink's EDID.
-                let desc = hdr_desc.unwrap_or(ImageDescription {
+                // Keep connector metadata stable in always-on HDR mode. Changing it for
+                // fullscreen content can force an HDMI modeset and several seconds of
+                // black screen on NVIDIA, even though the output stays in PQ/BT.2020.
+                // Auto mode still uses the fullscreen content's metadata for passthrough.
+                let metadata_desc = if always_on { None } else { hdr_desc };
+                let desc = metadata_desc.unwrap_or(ImageDescription {
                     transfer: CmTransferFunction::St2084Pq,
                     primaries: CmPrimariesOption {
                         named: Some(CmPrimaries::Bt2020),
