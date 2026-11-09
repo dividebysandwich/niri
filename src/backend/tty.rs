@@ -2231,28 +2231,13 @@ impl Tty {
             let blend_hdr = hdr_allowed && (always_on || hdr_desc.is_some());
 
             let desired = if blend_hdr {
-                // Keep connector metadata stable in always-on HDR mode. Changing it for
-                // fullscreen content can force an HDMI modeset and several seconds of
-                // black screen on NVIDIA, even though the output stays in PQ/BT.2020.
-                // Auto mode still uses the fullscreen content's metadata for passthrough.
-                let metadata_desc = if always_on { None } else { hdr_desc };
-                let desc = metadata_desc.unwrap_or(ImageDescription {
-                    transfer: CmTransferFunction::St2084Pq,
-                    primaries: CmPrimariesOption {
-                        named: Some(CmPrimaries::Bt2020),
-                        values: None,
-                    },
-                    max_cll: None,
-                    max_fall: None,
-                    mastering_luminance: None,
-                    mastering_primaries: None,
-                    luminances: None,
-                    windows_scrgb: false,
-                    windows_bt2100: false,
-                });
                 ConnectorColorState {
                     colorspace: Colorspace::Bt2020Rgb,
-                    hdr_metadata: Some(build_hdr_metadata(&desc, &surface.edid_hdr)),
+                    hdr_metadata: Some(build_output_hdr_metadata(
+                        always_on,
+                        hdr_desc,
+                        &surface.edid_hdr,
+                    )),
                     max_bpc,
                 }
             } else {
@@ -3685,6 +3670,32 @@ fn get_edid_info(
     libdisplay_info::info::Info::parse_edid(&data).context("error parsing EDID")
 }
 
+fn build_output_hdr_metadata(
+    always_on: bool,
+    content: Option<ImageDescription>,
+    edid: &EdidHdrInfo,
+) -> HdrOutputMetadata {
+    // Keep connector metadata stable in always-on mode: changing it for fullscreen
+    // content can blank some HDMI displays even while the output stays PQ/BT.2020.
+    // Auto mode still forwards the fullscreen content's metadata.
+    let content = if always_on { None } else { content };
+    let desc = content.unwrap_or(ImageDescription {
+        transfer: CmTransferFunction::St2084Pq,
+        primaries: CmPrimariesOption {
+            named: Some(CmPrimaries::Bt2020),
+            values: None,
+        },
+        max_cll: None,
+        max_fall: None,
+        mastering_luminance: None,
+        mastering_primaries: None,
+        luminances: None,
+        windows_scrgb: false,
+        windows_bt2100: false,
+    });
+    build_hdr_metadata(&desc, edid)
+}
+
 /// Builds the HDR static metadata to signal on the connector for a client's image description:
 /// a PQ infoframe with the description's mastering display primaries (target color volume),
 /// falling back to its container primaries when the client didn't provide any.
@@ -3925,12 +3936,57 @@ mod tests {
     use insta::assert_debug_snapshot;
     use niri_config::output::Modeline;
     use niri_ipc::{HSyncPolarity, VSyncPolarity};
-
     use smithay::wayland::color::management::ImageDescription;
 
     use crate::backend::tty::{
-        build_hdr_metadata, calculate_drm_mode_from_modeline, calculate_mode_cvt, EdidHdrInfo,
+        build_hdr_metadata, build_output_hdr_metadata, calculate_drm_mode_from_modeline,
+        calculate_mode_cvt, EdidHdrInfo,
     };
+
+    #[test]
+    fn output_hdr_metadata_fullscreen_transitions() {
+        use smithay::wayland::color::management::{Chromaticities, Primaries};
+
+        for edid in [
+            EdidHdrInfo::default(),
+            EdidHdrInfo {
+                pq: true,
+                bt2020_rgb: true,
+                max_luminance: 800,
+                min_luminance: 100,
+                max_frame_avg_luminance: 600,
+            },
+        ] {
+            let baseline = build_output_hdr_metadata(true, None, &edid);
+            let mut content = ImageDescription {
+                transfer: super::CmTransferFunction::St2084Pq,
+                primaries: super::CmPrimariesOption {
+                    named: Some(Primaries::Bt2020),
+                    values: None,
+                },
+                max_cll: Some(650),
+                max_fall: Some(300),
+                mastering_luminance: Some((200, 700)),
+                mastering_primaries: Some(Chromaticities::from_named(Primaries::DisplayP3)),
+                luminances: None,
+                windows_scrgb: false,
+                windows_bt2100: false,
+            };
+            // Enter fullscreen, change content metadata, then leave fullscreen.
+            for max_cll in [650, 400] {
+                content.max_cll = Some(max_cll);
+                assert_eq!(
+                    build_output_hdr_metadata(true, Some(content), &edid),
+                    baseline
+                );
+                let auto = build_output_hdr_metadata(false, Some(content), &edid);
+                assert_eq!(auto, build_hdr_metadata(&content, &edid));
+                assert_ne!(auto, baseline);
+                assert_eq!(auto.max_cll, max_cll as u16);
+            }
+            assert_eq!(build_output_hdr_metadata(true, None, &edid), baseline);
+        }
+    }
 
     #[test]
     fn hdr_metadata_luminance_priorities() {
